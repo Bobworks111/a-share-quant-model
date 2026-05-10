@@ -2,9 +2,13 @@
 因子计算引擎
 消费股价值投资量化模型
 学术依据：Buffett's Alpha (AQR 2018), Quality Minus Junk (AQR 2019)
+修复：权重归一化、二元变量处理、缺失值策略
 """
+import logging
 import pandas as pd
 import numpy as np
+
+logger = logging.getLogger("quant.factor")
 
 
 # ============ 去极值 ============
@@ -14,7 +18,10 @@ def winsorize_mad(series, n=5):
     median = series.median()
     mad = (series - median).abs().median()
     if mad == 0:
-        return series
+        # MAD为0时，尝试用百分位数去极值
+        q01 = series.quantile(0.01)
+        q99 = series.quantile(0.99)
+        return series.clip(q01, q99)
     upper = median + n * 1.4826 * mad
     lower = median - n * 1.4826 * mad
     return series.clip(lower, upper)
@@ -26,41 +33,77 @@ def zscore(series):
     """z-score标准化"""
     std = series.std()
     if std == 0 or pd.isna(std):
-        return pd.Series(0, index=series.index)
+        return pd.Series(0.0, index=series.index)
     return (series - series.mean()) / std
+
+
+def rank_score(series):
+    """排名百分位标准化（适用于二元/离散变量）"""
+    return series.rank(pct=True)
+
+
+def is_binary(series):
+    """判断是否为二元变量（只取0和1）"""
+    unique = series.dropna().unique()
+    return set(unique).issubset({0, 1, 0.0, 1.0})
 
 
 # ============ 因子预处理 ============
 
-def preprocess_indicator(series):
-    """单个指标预处理：去极值 → z-score标准化"""
+def preprocess_indicator(series, use_rank=False):
+    """
+    单个指标预处理
+    use_rank=True时使用排名百分位（适用于二元/离散变量）
+    """
+    if use_rank or is_binary(series):
+        return rank_score(series)
+
     s = winsorize_mad(series)
-    s = s.fillna(s.median())
-    return zscore(s)
+    return zscore(s.fillna(s.median()))
 
 
-# ============ 因子得分计算 ============
+# ============ 因子得分计算（带权重归一化）============
 
 def calc_factor_score(df, factor_name, factor_config):
     """
     计算单个因子的综合得分
-    df: 包含所有指标列的DataFrame
-    factor_name: 因子名称
-    factor_config: 因子配置（含indicators和weight）
+    修复：当指标缺失时，按剩余指标的权重重新归一化
     """
     indicators = factor_config["indicators"]
     scores = pd.DataFrame(index=df.index)
+    available_weight = 0.0
 
     for ind_name, params in indicators.items():
         if ind_name in df.columns:
             col = pd.to_numeric(df[ind_name], errors="coerce")
-            processed = preprocess_indicator(col)
+
+            # 跳过全为NaN的列
+            if col.isna().all():
+                logger.debug(f"{factor_name}.{ind_name} 全为NaN，跳过")
+                continue
+
+            # 二元变量使用排名百分位
+            use_rank = is_binary(col)
+            processed = preprocess_indicator(col, use_rank=use_rank)
+
             # ascending=True表示越小越好，取负号使方向统一（越大越好）
             if params["ascending"]:
                 processed = -processed
-            scores[ind_name] = processed * params["weight"]
 
-    return scores.sum(axis=1)
+            scores[ind_name] = processed * params["weight"]
+            available_weight += params["weight"]
+
+    if available_weight == 0:
+        logger.warning(f"{factor_name} 无可用指标")
+        return pd.Series(0.0, index=df.index)
+
+    # 权重归一化：确保因子得分的绝对值可比
+    raw_score = scores.sum(axis=1)
+    if available_weight < 0.99:
+        logger.info(f"{factor_name} 权重归一化: {available_weight:.2f} -> 1.00")
+        raw_score = raw_score / available_weight
+
+    return raw_score
 
 
 # ============ 公司质量因子（QMJ盈利能力）============
@@ -160,8 +203,9 @@ def calc_growth_factors(df):
         peg = pe / growth.replace(0, np.nan)
         peg = peg.where(growth > 0, np.nan)
 
-        # 调整PEG：增长越稳定，调整后PEG越低（越好）
-        peg_adjusted = peg * (1 + stability.clip(0, 2))  # 限制稳定性影响
+        # 调整PEG：增长越不稳定（stability越大），PEG越高（越差）
+        # 稳定性上限改为5，避免截断过度
+        peg_adjusted = peg * (1 + stability.clip(0, 5))
         result["peg_adjusted"] = peg_adjusted
 
     # 增速稳定性

@@ -3,6 +3,10 @@
 消费股价值投资量化模型（巴菲特+林奇+马克斯）
 学术依据：Buffett's Alpha (AQR 2018), Quality Minus Junk (AQR 2019)
 """
+import os
+
+# 项目根目录（基于 config.py 的位置）
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ============ 硬约束（第一阶段筛选）============
 HARD_CONSTRAINTS = {
@@ -110,4 +114,4 @@ CONSUMER_STOCKS = [
 ]
 
 # ============ 输出路径 ============
-OUTPUT_DIR = "../output"
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
