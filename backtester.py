@@ -262,3 +262,122 @@ def calc_performance(values, dates, period_returns, turnover_list, initial_cash)
         "values": values,
         "dates": dates,
     }
+
+
+# ============ 滚动回测 ============
+
+def run_rolling_backtest(stock_codes, train_years=3, test_years=1,
+                         start_date=None, end_date=None, top_n=None):
+    """
+    滚动窗口回测（Walk-Forward）
+    用过去train_years的数据训练，预测未来test_years
+
+    参数:
+        train_years: 训练窗口（年）
+        test_years: 测试窗口（年）
+    """
+    if start_date is None:
+        start_date = BACKTEST["start_date"]
+    if end_date is None:
+        end_date = BACKTEST["end_date"]
+    if top_n is None:
+        top_n = BACKTEST.get("top_n", 10)
+
+    start_dt = pd.Timestamp(start_date)
+    end_dt = pd.Timestamp(end_date)
+
+    # 计算滚动窗口
+    train_days = train_years * 365
+    test_days = test_years * 365
+
+    windows = []
+    current_start = start_dt
+    while current_start + timedelta(days=train_days + test_days) <= end_dt:
+        train_end = current_start + timedelta(days=train_days)
+        test_end = train_end + timedelta(days=test_days)
+        windows.append({
+            "train_start": current_start.strftime("%Y-%m-%d"),
+            "train_end": train_end.strftime("%Y-%m-%d"),
+            "test_start": train_end.strftime("%Y-%m-%d"),
+            "test_end": min(test_end, end_dt).strftime("%Y-%m-%d"),
+        })
+        current_start = current_start + timedelta(days=test_days)
+
+    logger.info(f"滚动回测: {len(windows)}个窗口, 训练{train_years}年, 测试{test_years}年")
+
+    # 预加载行情
+    price_data = {}
+    for code in stock_codes:
+        try:
+            df = get_price_data(code, start_date=start_date.replace("-", ""))
+            if df is not None and not df.empty:
+                price_data[code] = df
+        except Exception:
+            pass
+
+    # 逐窗口回测
+    all_returns = []
+    window_results = []
+
+    for i, window in enumerate(windows):
+        logger.info(f"\n窗口 {i+1}/{len(windows)}: "
+                    f"训练 {window['train_start']}~{window['train_end']}, "
+                    f"测试 {window['test_start']}~{window['test_end']}")
+
+        # 在训练期末获取快照，生成信号
+        try:
+            snapshot = get_snapshot(stock_codes, as_of_date=window["train_end"])
+            if snapshot.empty:
+                continue
+        except Exception as e:
+            logger.warning(f"  快照构建失败: {e}")
+            continue
+
+        signal = generate_signal(snapshot, top_n=top_n)
+        if not signal["stocks"]:
+            continue
+
+        # 计算测试期收益
+        returns = calc_period_return(price_data, signal["stocks"],
+                                     window["test_start"], window["test_end"])
+        if not returns:
+            continue
+
+        avg_return = np.mean(list(returns.values()))
+        all_returns.append(avg_return)
+        window_results.append({
+            "window": i + 1,
+            "train_period": f"{window['train_start']}~{window['train_end']}",
+            "test_period": f"{window['test_start']}~{window['test_end']}",
+            "n_stocks": len(returns),
+            "return": avg_return,
+        })
+
+        logger.info(f"  测试期收益: {avg_return*100:+.2f}%")
+
+    if not all_returns:
+        logger.error("滚动回测无有效数据")
+        return None
+
+    # 汇总
+    returns_arr = np.array(all_returns)
+    cumulative = np.prod(1 + returns_arr) - 1
+
+    logger.info("\n" + "=" * 60)
+    logger.info("滚动回测结果")
+    logger.info("=" * 60)
+    logger.info(f"窗口数: {len(all_returns)}")
+    logger.info(f"累计收益: {cumulative*100:+.2f}%")
+    logger.info(f"平均每窗口收益: {returns_arr.mean()*100:+.2f}%")
+    logger.info(f"收益标准差: {returns_arr.std()*100:.2f}%")
+    logger.info(f"胜率: {(returns_arr > 0).mean()*100:.1f}%")
+    logger.info("=" * 60)
+
+    return {
+        "cumulative_return": cumulative,
+        "mean_return": returns_arr.mean(),
+        "std_return": returns_arr.std(),
+        "win_rate": (returns_arr > 0).mean(),
+        "n_windows": len(all_returns),
+        "window_results": window_results,
+    }
