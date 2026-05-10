@@ -15,6 +15,7 @@ from data_fetcher import get_stock_pool
 from dataset_builder import get_snapshot
 from strategy import generate_signal, generate_report
 from backtester import run_backtest
+from fraud_detector import check_pool, generate_fraud_report
 
 
 def get_stock_codes():
@@ -65,6 +66,37 @@ def run_backtest_mode(stock_codes, top_n=10):
     return results
 
 
+def run_fraud_check(stock_codes):
+    """运行造假风险检测"""
+    logger.info("开始造假风险检测...")
+
+    # 获取股票名称
+    stock_names = {}
+    try:
+        quotes_df = get_snapshot(stock_codes, as_of_date=datetime.now().strftime("%Y-%m-%d"))
+        if not quotes_df.empty and "name" in quotes_df.columns:
+            stock_names = dict(zip(quotes_df["code"], quotes_df["name"]))
+    except Exception:
+        pass
+
+    results = check_pool(stock_codes, stock_names=stock_names)
+    report = generate_fraud_report(results)
+    logger.info("\n" + report)
+
+    # 保存结果
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    date_str = datetime.now().strftime("%Y%m%d")
+
+    report_file = os.path.join(OUTPUT_DIR, f"fraud_check_{date_str}.txt")
+    with open(report_file, "w", encoding="utf-8") as f:
+        f.write(report)
+    logger.info(f"报告已保存: {report_file}")
+
+    excel_file = os.path.join(OUTPUT_DIR, f"fraud_check_{date_str}.xlsx")
+    results.to_excel(excel_file, index=False)
+    logger.info(f"数据已保存: {excel_file}")
+
+
 def main():
     """主函数"""
     setup_logging()
@@ -84,6 +116,8 @@ def main():
 
     if mode == "backtest":
         run_backtest_mode(stock_codes)
+    elif mode == "fraud_check":
+        run_fraud_check(stock_codes)
     else:
         run_screener(stock_codes)
 

@@ -204,3 +204,86 @@ def get_industry_classification():
     except Exception as e:
         logger.warning(f"获取行业分类失败: {e}")
         return None
+
+
+# ============ 监管处罚信息 ============
+
+@retry(max_retries=2, base_delay=1.0)
+def get_penalty_info(stock_code):
+    """
+    获取监管处罚信息
+    返回: 警告信息列表
+    """
+    cache_file = os.path.join(CACHE_DIR, f"penalty_{stock_code}.json")
+
+    if _is_cache_valid(cache_file, max_age_days=7):
+        with open(cache_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    flags = []
+
+    try:
+        # 检查是否被ST
+        quotes = get_realtime_quotes()
+        if quotes is not None and not quotes.empty:
+            row = quotes[quotes["代码"] == stock_code]
+            if not row.empty:
+                name = row.iloc[0].get("名称", "")
+                if "ST" in name:
+                    flags.append(f"ST标记: {name}")
+    except Exception:
+        pass
+
+    try:
+        # 获取违规信息
+        df = ak.stock_regulation_guard_em(symbol=stock_code)
+        if df is not None and not df.empty:
+            recent = df.head(3)  # 最近3条
+            for _, row in recent.iterrows():
+                title = row.get("公告标题", row.get("标题", ""))
+                if title:
+                    flags.append(f"监管: {title}")
+    except Exception:
+        pass
+
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump(flags, f, ensure_ascii=False)
+
+    return flags
+
+
+# ============ 审计意见 ============
+
+@retry(max_retries=2, base_delay=1.0)
+def get_audit_opinion(stock_code):
+    """
+    获取审计意见
+    返回: 审计意见字符串
+    """
+    cache_file = os.path.join(CACHE_DIR, f"audit_{stock_code}.json")
+
+    if _is_cache_valid(cache_file, max_age_days=90):
+        with open(cache_file, "r", encoding="utf-8") as f:
+            return json.load(f).get("opinion", "未知")
+
+    opinion = "未知"
+
+    try:
+        # 通过财务分析指标获取审计意见
+        df = ak.stock_financial_analysis_indicator(symbol=stock_code)
+        if df is not None and not df.empty:
+            # 检查是否有审计意见列
+            audit_col = None
+            for col in df.columns:
+                if "审计" in col or "意见" in col:
+                    audit_col = col
+                    break
+            if audit_col:
+                opinion = str(df.iloc[0].get(audit_col, "未知"))
+    except Exception:
+        pass
+
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump({"opinion": opinion}, f, ensure_ascii=False)
+
+    return opinion

@@ -115,3 +115,10 @@ CONSUMER_STOCKS = [
 
 # ============ 输出路径 ============
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
+
+# ============ 造假检测配置 ============
+FRAUD_CHECK = {
+    "m_score_threshold": -1.78,       # Beneish M-Score 阈值（>此值为造假嫌疑）
+    "receivable_growth_limit": 2.0,   # 应收增速/营收增速上限
+    "check_interval_days": 30,        # 检查间隔（天）
+}
